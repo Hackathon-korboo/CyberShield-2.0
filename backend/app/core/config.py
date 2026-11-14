@@ -33,7 +33,7 @@ class Settings(BaseModel):
     """Application settings and configuration parameters for all 4 members."""
 
     app_name: str = Field(default_factory=lambda: os.getenv("APP_NAME", "CyberShield AI API"))
-    app_version: str = Field(default_factory=lambda: os.getenv("APP_VERSION", "1.0.0"))
+    app_version: str = Field(default_factory=lambda: os.getenv("APP_VERSION", "2.0.0"))
     api_v1_prefix: str = "/api/v1"
     environment: str = Field(default_factory=lambda: os.getenv("ENVIRONMENT", "development"))
     debug: bool = Field(default_factory=lambda: os.getenv("DEBUG", "true").lower() in ("true", "1", "yes"))
