@@ -139,11 +139,11 @@ class MessageAnalyzerService:
         indicators: List[MessageIndicator] = []
         for ind in m2_resp.observed_indicators:
             name_lower = ind.indicator.lower()
-            if any(k in name_lower for k in ["otp", "password", "credential", "arrest", "pin", "wire transfer", "prompt", "cvv", "unencrypted http", "card harvesting"]):
+            if any(k in name_lower for k in ["otp", "password", "credential", "arrest", "pin", "wire transfer", "prompt", "cvv", "unencrypted http", "card harvesting", "qr", "callback trap"]):
                 severity = "Critical"
-            elif any(k in name_lower for k in ["fee", "kyc", "urgency", "guaranteed", "suspension", "block", "aadhaar", "pan", "identity", "bank account", "investment", "deposit", "delivery", "infected", "lottery", "payout"]):
+            elif any(k in name_lower for k in ["fee", "kyc", "urgency", "guaranteed", "suspension", "block", "aadhaar", "pan", "identity", "bank account", "investment", "deposit", "delivery", "infected", "lottery", "payout", "spoofing", "disconnection", "task scam", "attachment lure"]):
                 severity = "High"
-            elif any(k in name_lower for k in ["screenshot", "portal", "deadline", "cancellation", "support", "impersonation", "lure", "action"]):
+            elif any(k in name_lower for k in ["screenshot", "portal", "deadline", "cancellation", "support", "impersonation", "lure", "action", "tld", "raw ip"]):
                 severity = "Medium"
             else:
                 severity = "Medium"

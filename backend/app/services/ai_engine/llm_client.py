@@ -75,64 +75,78 @@ class LLMClient:
 
     @staticmethod
     def _discover_providers() -> List[Tuple[str, str, str, str]]:
-        """Discover and configure active providers in priority order: Groq -> Gemini -> OpenAI."""
+        """Discover and configure active providers respecting AI_PROVIDER preference.
+        
+        Priority order defaults to: Gemini -> Groq -> OpenAI when AI_PROVIDER is 'gemini'.
+        """
         configured: List[Tuple[str, str, str, str]] = []
+        preferred_provider = getattr(settings, "AI_PROVIDER", "gemini").lower()
 
-        # 1. Tier 1: Groq Cloud
-        groq_key = getattr(settings, "GROQ_API_KEY", None)
-        if groq_key and groq_key.strip():
-            configured.append((
-                "Groq Cloud",
-                groq_key.strip(),
-                getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b"),
-                "https://api.groq.com/openai/v1",
-            ))
-
-        # 2. Tier 2: Google Gemini (OpenAI-compatible endpoint)
+        gemini_tuple = None
         gemini_key = getattr(settings, "GEMINI_API_KEY", None)
         if gemini_key and gemini_key.strip():
-            configured.append((
+            gemini_tuple = (
                 "Google Gemini",
                 gemini_key.strip(),
                 getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash"),
                 "https://generativelanguage.googleapis.com/v1beta/openai",
-            ))
+            )
 
-        # 3. Tier 3: OpenAI
+        groq_tuple = None
+        groq_key = getattr(settings, "GROQ_API_KEY", None)
+        if groq_key and groq_key.strip():
+            groq_tuple = (
+                "Groq Cloud",
+                groq_key.strip(),
+                getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b"),
+                "https://api.groq.com/openai/v1",
+            )
+
+        openai_tuple = None
         openai_key = getattr(settings, "OPENAI_API_KEY", None)
         if openai_key and openai_key.strip():
-            configured.append((
+            openai_tuple = (
                 "OpenAI",
                 openai_key.strip(),
                 getattr(settings, "OPENAI_MODEL", "gpt-4o-mini"),
                 "https://api.openai.com/v1",
-            ))
+            )
 
-        # 4. Fallback generic AI_API_KEY if none of the above are set
+        if "gemini" in preferred_provider:
+            candidate_order = [gemini_tuple, groq_tuple, openai_tuple]
+        elif "openai" in preferred_provider:
+            candidate_order = [openai_tuple, gemini_tuple, groq_tuple]
+        else:
+            candidate_order = [groq_tuple, gemini_tuple, openai_tuple]
+
+        for prov in candidate_order:
+            if prov is not None:
+                configured.append(prov)
+
+        # Fallback generic AI_API_KEY if none of the above are set
         if not configured:
             ai_key = getattr(settings, "AI_API_KEY", None)
             if ai_key and ai_key.strip():
-                provider_type = getattr(settings, "AI_PROVIDER", "groq").lower()
-                if "gemini" in provider_type:
+                if "groq" in preferred_provider:
                     configured.append((
-                        "Google Gemini",
+                        "Groq Cloud",
                         ai_key.strip(),
-                        "gemini-1.5-flash",
-                        "https://generativelanguage.googleapis.com/v1beta/openai",
+                        getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b"),
+                        "https://api.groq.com/openai/v1",
                     ))
-                elif "openai" in provider_type:
+                elif "openai" in preferred_provider:
                     configured.append((
                         "OpenAI",
                         ai_key.strip(),
-                        "gpt-4o-mini",
+                        getattr(settings, "OPENAI_MODEL", "gpt-4o-mini"),
                         "https://api.openai.com/v1",
                     ))
                 else:
                     configured.append((
-                        "Groq Cloud",
+                        "Google Gemini",
                         ai_key.strip(),
-                        "openai/gpt-oss-120b",
-                        "https://api.groq.com/openai/v1",
+                        getattr(settings, "GEMINI_MODEL", "gemini-1.5-flash"),
+                        "https://generativelanguage.googleapis.com/v1beta/openai",
                     ))
 
         return configured
@@ -202,15 +216,16 @@ class LLMClient:
                                 f"Failed to parse LLM output as JSON from {name}: {str(jde)}"
                             )
 
-                    elif response.status_code == 429:
+                    elif response.status_code == 429 or (response.status_code == 400 and "RESOURCE_EXHAUSTED" in response.text):
                         retries += 1
                         if retries > self.max_retries:
                             raise LLMRateLimitError(
-                                f"{name} rate limit / quota exceeded (HTTP 429) after {self.max_retries} retries."
+                                f"{name} rate limit / quota exceeded (HTTP {response.status_code}) after {self.max_retries} retries."
                             )
                         logger.warning(
-                            "%s rate limited (HTTP 429). Retrying in %.2f seconds (attempt %d/%d)",
+                            "%s rate limited (HTTP %d). Retrying in %.2f seconds (attempt %d/%d)",
                             name,
+                            response.status_code,
                             backoff,
                             retries,
                             self.max_retries,

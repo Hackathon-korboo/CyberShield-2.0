@@ -11,10 +11,12 @@ from datetime import datetime, timezone
 import json
 import time
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
+from fastapi import APIRouter, HTTPException, status, Depends, Query, Request, File, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, desc
+
+from app.services.file_security import FileThreatAnalyzer, FileThreatAnalysisResponse
 
 from app.schemas.url_scan import (
     URLScanRequest as M1URLScanRequest,
@@ -728,6 +730,251 @@ async def scan_email_master(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Email analysis failed: {str(e)}"
+        )
+
+
+@router.post(
+    "/scans/file",
+    response_model=ScanDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Antivirus-Style Static File Threat Analysis (Member 2 + Member 4)",
+    tags=["File Security"]
+)
+async def scan_file_master(
+    file: UploadFile = File(..., description="Uploaded file for static security analysis"),
+    db: Session = Depends(get_db)
+) -> ScanDetailResponse:
+    """
+    Submits an uploaded file for Antivirus-Style Static File Threat Analysis:
+    - Safe upload validation (max 25 MB, zero dynamic execution)
+    - Cryptographic fingerprinting (MD5, SHA-1, SHA-256, SHA-512)
+    - Magic bytes signature inspection vs. reported extension (detects extension spoofing)
+    - Archive safety inspection (Zip Slip path traversal & Zip Bomb / ratio checks)
+    - Known malware hash matching (EICAR, ransomware, trojans, botnets)
+    - Gemini contextual threat explanation (sanitized metadata only)
+    - Relational persistence and SHA-256 canonical report verification
+    """
+    filename = file.filename or "uploaded_file"
+    try:
+        contents = await file.read()
+    except Exception as read_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read uploaded file: {str(read_err)}"
+        )
+
+    if len(contents) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is completely empty (0 bytes)."
+        )
+
+    if len(contents) > 25 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Uploaded file exceeds the maximum allowed limit of 25 MB."
+        )
+
+    try:
+        # 1. Execute static analysis
+        analysis = FileThreatAnalyzer.scan_file_bytes(
+            file_bytes=contents,
+            filename=filename,
+            content_type=file.content_type,
+        )
+
+        # 2. Asynchronously request Gemini contextual explanation (sanitized metadata only)
+        try:
+            ai_explanation = await FileThreatAnalyzer.explain_threat_with_gemini(analysis)
+            analysis.ai_contextual_explanation = ai_explanation
+        except Exception as ai_err:
+            logger.warning(f"AI file explanation failed: {ai_err}")
+
+        preview_target = filename[:120]
+        risk_level_str = analysis.risk_level.value
+        risk_score_int = analysis.risk_score
+
+        # 3. Create Scan entity
+        scan = Scan(
+            target=preview_target,
+            scan_type="file",
+            status="completed",
+            risk_level=risk_level_str,
+            risk_score=risk_score_int,
+        )
+        db.add(scan)
+        db.flush()
+
+        db.add(ScanEvent(
+            scan_id=scan.id,
+            event_type="file_static_analysis",
+            description=(
+                f"Static inspection of '{filename}' ({len(contents)} bytes). "
+                f"Format: {analysis.signature_analysis.detected_format}. "
+                f"SHA-256: {analysis.hashes.sha256[:16]}..."
+            )
+        ))
+
+        # 4. Build canonical report & hash
+        canonical_dict = ReportVerifier.build_canonical_payload(
+            scan_id=scan.id,
+            target=preview_target,
+            risk_level=risk_level_str,
+            risk_score=risk_score_int,
+            summary=analysis.summary,
+            evidence=analysis.evidence,
+            recommendations=analysis.recommendations,
+        )
+        report_hash = ReportVerifier.calculate_hash(canonical_dict)
+
+        # 5. Save RiskReport
+        report = RiskReport(
+            scan_id=scan.id,
+            summary=analysis.summary,
+            evidence=json.dumps(analysis.evidence),
+            recommendations=json.dumps(analysis.recommendations),
+            report_hash=report_hash,
+            verification_status="locally_hashed",
+            blockchain_tx=None,
+        )
+        db.add(report)
+
+        db.add(ScanEvent(
+            scan_id=scan.id,
+            event_type="report_generation",
+            description=f"Generated file threat report with SHA-256 cryptographic proof: {report_hash[:16]}..."
+        ))
+        db.commit()
+        db.refresh(scan)
+        db.refresh(report)
+
+        # Ingest into ThreatGraphService if available
+        try:
+            from app.services.nexus.graph_service import ThreatGraphService
+            file_meta = {
+                "sha256": analysis.hashes.sha256,
+                "md5": analysis.hashes.md5,
+                "mime": analysis.signature_analysis.detected_mime,
+                "format": analysis.signature_analysis.detected_format,
+            }
+            ThreatGraphService.ingest_scan(
+                db=db,
+                scan_id=scan.id,
+                scan_type="file",
+                target=preview_target,
+                risk_level=risk_level_str,
+                technical_data=file_meta,
+            )
+        except Exception:
+            pass
+
+        # Map indicators
+        message_indicators = [
+            MessageIndicator(
+                category=ind.category.value,
+                severity=ind.severity,
+                description=ind.description,
+            )
+            for ind in analysis.indicators
+        ]
+
+        return ScanDetailResponse(
+            scan_id=scan.id,
+            scan_type=scan.scan_type,
+            target=scan.target,
+            normalized_target=None,
+            domain=None,
+            hostname=None,
+            status=scan.status,
+            risk_level=scan.risk_level,
+            risk_score=scan.risk_score,
+            created_at=scan.created_at,
+            providers_checked=[],
+            report=RiskReportSchema(
+                report_id=report.id,
+                summary=report.summary,
+                evidence=analysis.evidence,
+                recommendations=analysis.recommendations,
+                report_hash=report.report_hash,
+                verification_status=report.verification_status,
+                blockchain_tx=report.blockchain_tx,
+                created_at=report.created_at,
+            ),
+            events=[
+                ScanEventSchema(
+                    event_type=e.event_type,
+                    description=e.description,
+                    created_at=e.created_at,
+                ) for e in scan.events
+            ],
+            message_indicators=message_indicators,
+            analysis_engine=analysis.engine,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"File threat analysis failed: {str(e)}"
+        )
+
+
+@router.post(
+    "/analyze-file",
+    response_model=FileThreatAnalysisResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Direct Static File Threat Analysis (Member 2 Contract)",
+    tags=["File Security"]
+)
+async def analyze_file_endpoint(
+    file: UploadFile = File(..., description="Uploaded file for static security analysis")
+) -> FileThreatAnalysisResponse:
+    """
+    Direct Member 2 API contract for Antivirus-Style Static File Threat Analysis.
+    Returns complete technical telemetry including hashes, magic signatures,
+    archive inspection records, detected threat indicators, and Gemini contextual explanation.
+    """
+    filename = file.filename or "uploaded_file"
+    try:
+        contents = await file.read()
+    except Exception as read_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read uploaded file: {str(read_err)}"
+        )
+
+    if len(contents) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is completely empty (0 bytes)."
+        )
+
+    if len(contents) > 25 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Uploaded file exceeds maximum allowed limit of 25 MB."
+        )
+
+    try:
+        analysis = FileThreatAnalyzer.scan_file_bytes(
+            file_bytes=contents,
+            filename=filename,
+            content_type=file.content_type,
+        )
+        try:
+            ai_explanation = await FileThreatAnalyzer.explain_threat_with_gemini(analysis)
+            analysis.ai_contextual_explanation = ai_explanation
+        except Exception as ai_err:
+            logger.warning(f"AI file explanation failed: {ai_err}")
+
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Static file analysis failed: {str(exc)}"
         )
 
 

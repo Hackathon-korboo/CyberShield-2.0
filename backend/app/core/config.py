@@ -7,12 +7,26 @@ Member 1, Member 2, Member 3, and Member 4 requirements.
 
 from functools import lru_cache
 import os
+from pathlib import Path
+import sys
 from typing import List, Optional
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-# Load optional .env file from project root or backend directory
+# Load optional .env / API.env file from project root or backend directory
 load_dotenv()
+if "pytest" not in sys.modules and not os.getenv("PYTEST_CURRENT_TEST"):
+    _project_root = Path(__file__).resolve().parent.parent.parent.parent
+    for _env_path in [
+        Path.cwd() / "API.env",
+        Path.cwd() / ".env",
+        _project_root / "API.env",
+        _project_root / ".env",
+        Path(__file__).resolve().parent.parent.parent / "API.env",
+        Path(__file__).resolve().parent.parent.parent / ".env",
+    ]:
+        if _env_path.exists():
+            load_dotenv(dotenv_path=_env_path, override=False)
 
 
 class Settings(BaseModel):
@@ -71,7 +85,7 @@ class Settings(BaseModel):
     )
 
     # AI Scam Analysis — Multi-Provider Failover (Member 2)
-    ai_provider: str = Field(default_factory=lambda: os.getenv("AI_PROVIDER", "groq"))
+    ai_provider: str = Field(default_factory=lambda: os.getenv("AI_PROVIDER", "gemini"))
     ai_api_key: str = Field(default_factory=lambda: os.getenv("AI_API_KEY", ""))
     ai_model_name: str = Field(default_factory=lambda: os.getenv("AI_MODEL_NAME", "gemini-1.5-flash"))
 

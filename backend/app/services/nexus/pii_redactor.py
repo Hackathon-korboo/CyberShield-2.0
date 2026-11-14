@@ -61,6 +61,10 @@ class PIIRedactor:
         r"""(?i)(?:otp|pin|code|password|passcode|verification\s*(?:code|otp)?)[\s:=#\-]+(?:is\s+)?(\b\d{4,8}\b)"""
     )
 
+    # 6. Government identity numbers (PAN card: 5 letters, 4 digits, 1 letter; Aadhaar: 12 digits)
+    PAN_REGEX = re.compile(r"""\b[A-Z]{5}[0-9]{4}[A-Z]\b""")
+    AADHAAR_REGEX = re.compile(r"""\b\d{4}[\s-]?\d{4}[\s-]?\d{4}\b""")
+
     @classmethod
     def redact(cls, text: str) -> RedactionResult:
         """
@@ -77,7 +81,8 @@ class PIIRedactor:
             "email": 0,
             "upi": 0,
             "account": 0,
-            "secret": 0
+            "secret": 0,
+            "id": 0,
         }
 
         # Step 1: Redact OTPs / PIN secrets first (context-aware)
@@ -150,6 +155,19 @@ class PIIRedactor:
             return val
 
         redacted = cls.ACCOUNT_REGEX.sub(replace_account, redacted)
+
+        # Step 6: Redact Government Identifiers (PAN & Aadhaar)
+        def replace_id(match: re.Match) -> str:
+            val = match.group(0).strip()
+            if val.startswith("[REDACTED_"):
+                return match.group(0)
+            counts["id"] += 1
+            placeholder = f"[REDACTED_ID_{counts['id']}]"
+            local_mapping[placeholder] = val
+            return placeholder
+
+        redacted = cls.PAN_REGEX.sub(replace_id, redacted)
+        redacted = cls.AADHAAR_REGEX.sub(replace_id, redacted)
 
         total_redactions = sum(counts.values())
 
